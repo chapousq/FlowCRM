@@ -1,41 +1,45 @@
-const db = require('../database');
+const { query } = require('../database');
 
-exports.get = (req, res) => {
-  const userId = req.userId;
+exports.get = async (req, res) => {
+  try {
+    const userId = req.userId;
 
-  const totalContacts = db.prepare('SELECT COUNT(*) as count FROM contacts WHERE user_id = ?').get(userId).count;
-  const totalDeals = db.prepare('SELECT COUNT(*) as count FROM deals WHERE user_id = ?').get(userId).count;
-  const totalValue = db.prepare('SELECT COALESCE(SUM(value), 0) as total FROM deals WHERE user_id = ?').get(userId).total;
-  const wonValue = db.prepare("SELECT COALESCE(SUM(value), 0) as total FROM deals WHERE user_id = ? AND stage = 'won'").get(userId).total;
-  const activeDeals = db.prepare("SELECT COUNT(*) as count FROM deals WHERE user_id = ? AND stage NOT IN ('won', 'lost')").get(userId).count;
-  const pendingActivities = db.prepare('SELECT COUNT(*) as count FROM activities WHERE user_id = ? AND completed = 0').get(userId).count;
+    const totalContactsResult = await query('SELECT COUNT(*) as count FROM contacts WHERE user_id = $1', [userId]);
+    const totalDealsResult = await query('SELECT COUNT(*) as count FROM deals WHERE user_id = $1', [userId]);
+    const totalValueResult = await query('SELECT COALESCE(SUM(value), 0) as total FROM deals WHERE user_id = $1', [userId]);
+    const wonValueResult = await query("SELECT COALESCE(SUM(value), 0) as total FROM deals WHERE user_id = $1 AND stage = 'won'", [userId]);
+    const activeDealsResult = await query("SELECT COUNT(*) as count FROM deals WHERE user_id = $1 AND stage NOT IN ('won', 'lost')", [userId]);
+    const pendingActivitiesResult = await query('SELECT COUNT(*) as count FROM activities WHERE user_id = $1 AND completed = false', [userId]);
 
-  const dealsByStage = db.prepare(`
-    SELECT stage, COUNT(*) as count, COALESCE(SUM(value), 0) as value
-    FROM deals WHERE user_id = ?
-    GROUP BY stage
-  `).all(userId);
+    const dealsByStageResult = await query(`
+      SELECT stage, COUNT(*) as count, COALESCE(SUM(value), 0) as value
+      FROM deals WHERE user_id = $1
+      GROUP BY stage
+    `, [userId]);
 
-  const recentDeals = db.prepare(`
-    SELECT d.*, c.name as contact_name
-    FROM deals d
-    LEFT JOIN contacts c ON d.contact_id = c.id
-    WHERE d.user_id = ?
-    ORDER BY d.created_at DESC
-    LIMIT 5
-  `).all(userId);
+    const recentDealsResult = await query(`
+      SELECT d.*, c.name as contact_name
+      FROM deals d
+      LEFT JOIN contacts c ON d.contact_id = c.id
+      WHERE d.user_id = $1
+      ORDER BY d.created_at DESC
+      LIMIT 5
+    `, [userId]);
 
-  const recentContacts = db.prepare('SELECT * FROM contacts WHERE user_id = ? ORDER BY created_at DESC LIMIT 5').all(userId);
+    const recentContactsResult = await query('SELECT * FROM contacts WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5', [userId]);
 
-  res.json({
-    totalContacts,
-    totalDeals,
-    totalValue,
-    wonValue,
-    activeDeals,
-    pendingActivities,
-    dealsByStage,
-    recentDeals,
-    recentContacts,
-  });
+    res.json({
+      totalContacts: parseInt(totalContactsResult.rows[0].count),
+      totalDeals: parseInt(totalDealsResult.rows[0].count),
+      totalValue: parseFloat(totalValueResult.rows[0].total),
+      wonValue: parseFloat(wonValueResult.rows[0].total),
+      activeDeals: parseInt(activeDealsResult.rows[0].count),
+      pendingActivities: parseInt(pendingActivitiesResult.rows[0].count),
+      dealsByStage: dealsByStageResult.rows,
+      recentDeals: recentDealsResult.rows,
+      recentContacts: recentContactsResult.rows,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao carregar dashboard' });
+  }
 };

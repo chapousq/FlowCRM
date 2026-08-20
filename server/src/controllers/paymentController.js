@@ -1,4 +1,4 @@
-const db = require('../database');
+const { query, pool } = require('../database');
 
 const PLANS = {
   free: { name: 'Free', price: 0, features: ['5 contatos', '10 negocios', '1 usuario'] },
@@ -10,7 +10,8 @@ exports.getPlans = (req, res) => {
   res.json(PLANS);
 };
 
-exports.checkout = (req, res) => {
+exports.checkout = async (req, res) => {
+  const client = await pool.connect();
   try {
     const userId = req.userId;
     const { plan, card_name, card_number, card_expiry, card_cvv, billing_email } = req.body;
@@ -43,63 +44,79 @@ exports.checkout = (req, res) => {
     const expiresAt = new Date(now);
     expiresAt.setMonth(expiresAt.getMonth() + 1);
 
-    const insertPayment = db.prepare(`
+    await client.query('BEGIN');
+
+    const paymentResult = await client.query(`
       INSERT INTO payments (user_id, plan, amount, status, payment_method, card_last4, card_name, billing_email, expires_at)
-      VALUES (?, ?, ?, 'completed', 'credit_card', ?, ?, ?, ?)
-    `);
+      VALUES ($1, $2, $3, 'completed', 'credit_card', $4, $5, $6, $7)
+      RETURNING id
+    `, [userId, plan, planData.price, last4, card_name, billing_email || '', expiresAt.toISOString()]);
 
-    const updateUser = db.prepare('UPDATE users SET plan = ? WHERE id = ?');
+    await client.query('UPDATE users SET plan = $1 WHERE id = $2', [plan, userId]);
 
-    const result = db.transaction(() => {
-      const payment = insertPayment.run(userId, plan, planData.price, last4, card_name, billing_email || '', expiresAt.toISOString());
-      updateUser.run(plan, userId);
-      return payment;
-    })();
+    await client.query('COMMIT');
 
-    const user = db.prepare('SELECT id, name, email, plan, role FROM users WHERE id = ?').get(userId);
+    const userResult = await query('SELECT id, name, email, plan, role FROM users WHERE id = $1', [userId]);
 
     res.json({
       message: 'Pagamento processado com sucesso',
       payment: {
-        id: result.lastInsertRowid,
+        id: paymentResult.rows[0].id,
         plan,
         amount: planData.price,
         last4,
         expiresAt: expiresAt.toISOString(),
       },
-      user,
+      user: userResult.rows[0],
     });
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('Checkout error:', err.message);
     res.status(500).json({ error: 'Erro ao processar pagamento' });
+  } finally {
+    client.release();
   }
 };
 
-exports.getMyPayments = (req, res) => {
-  const payments = db.prepare('SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC').all(req.userId);
-  res.json(payments);
-};
-
-exports.cancelSubscription = (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.userId);
-  if (!user) return res.status(404).json({ error: 'Usuario nao encontrado' });
-  if (user.plan === 'free') return res.status(400).json({ error: 'Voce ja esta no plano Free' });
-
-  db.prepare("UPDATE users SET plan = 'free' WHERE id = ?").run(req.userId);
-  db.prepare("UPDATE payments SET status = 'cancelled' WHERE user_id = ? AND status = 'completed'").run(req.userId);
-
-  res.json({ message: 'Assinatura cancelada. Plano rebaixado para Free.' });
-};
-
-exports.adminGetAllPayments = (req, res) => {
-  const { user_id } = req.query;
-  let query = 'SELECT p.*, u.name as user_name, u.email as user_email FROM payments p JOIN users u ON p.user_id = u.id';
-  const params = [];
-  if (user_id) {
-    query += ' WHERE p.user_id = ?';
-    params.push(user_id);
+exports.getMyPayments = async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM payments WHERE user_id = $1 ORDER BY created_at DESC', [req.userId]);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao listar pagamentos' });
   }
-  query += ' ORDER BY p.created_at DESC LIMIT 100';
-  const payments = db.prepare(query).all(...params);
-  res.json(payments);
+};
+
+exports.cancelSubscription = async (req, res) => {
+  try {
+    const userResult = await query('SELECT * FROM users WHERE id = $1', [req.userId]);
+    if (!userResult.rows[0]) return res.status(404).json({ error: 'Usuario nao encontrado' });
+    if (userResult.rows[0].plan === 'free') return res.status(400).json({ error: 'Voce ja esta no plano Free' });
+
+    await query("UPDATE users SET plan = 'free' WHERE id = $1", [req.userId]);
+    await query("UPDATE payments SET status = 'cancelled' WHERE user_id = $1 AND status = 'completed'", [req.userId]);
+
+    res.json({ message: 'Assinatura cancelada. Plano rebaixado para Free.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao cancelar assinatura' });
+  }
+};
+
+exports.adminGetAllPayments = async (req, res) => {
+  try {
+    const { user_id } = req.query;
+    let sql = 'SELECT p.*, u.name as user_name, u.email as user_email FROM payments p JOIN users u ON p.user_id = u.id';
+    const params = [];
+    let paramIndex = 1;
+    if (user_id) {
+      sql += ` WHERE p.user_id = $${paramIndex}`;
+      params.push(user_id);
+      paramIndex += 1;
+    }
+    sql += ' ORDER BY p.created_at DESC LIMIT 100';
+    const result = await query(sql, params);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao listar pagamentos' });
+  }
 };

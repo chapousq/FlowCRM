@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const db = require('../database');
+const { query } = require('../database');
 
 const SALT_ROUNDS = 12;
 const MAX_LOGIN_ATTEMPTS = 5;
@@ -38,17 +38,18 @@ exports.register = async (req, res) => {
       return res.status(400).json({ error: 'Senha deve ter entre 6 e 128 caracteres' });
     }
 
-    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+    const existing = (await query('SELECT id FROM users WHERE email = $1', [email])).rows[0];
     if (existing) {
       return res.status(400).json({ error: 'Email já cadastrado' });
     }
 
     const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
-    const result = db.prepare('INSERT INTO users (name, email, password) VALUES (?, ?, ?)').run(name, email, hashedPassword);
+    const result = (await query('INSERT INTO users (name, email, password) VALUES ($1, $2, $3) RETURNING id', [name, email, hashedPassword]));
 
-    const token = jwt.sign({ userId: result.lastInsertRowid }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const userId = result.rows[0].id;
+    const token = jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    res.json({ token, user: { id: result.lastInsertRowid, name, email, plan: 'free', role: 'user' } });
+    res.json({ token, user: { id: userId, name, email, plan: 'free', role: 'user' } });
   } catch (err) {
     console.error('Register error:', err.message);
     res.status(500).json({ error: 'Erro interno do servidor' });
@@ -64,7 +65,7 @@ exports.login = async (req, res) => {
       return res.status(400).json({ error: 'Email e senha são obrigatórios' });
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    const user = (await query('SELECT * FROM users WHERE email = $1', [email])).rows[0];
     if (!user) {
       return res.status(401).json({ error: 'Email ou senha incorretos' });
     }
@@ -83,14 +84,14 @@ exports.login = async (req, res) => {
       const attempts = (user.login_attempts || 0) + 1;
       if (attempts >= MAX_LOGIN_ATTEMPTS) {
         const lockUntil = new Date(Date.now() + LOCK_TIME).toISOString();
-        db.prepare('UPDATE users SET login_attempts = ?, locked_until = ? WHERE id = ?').run(0, lockUntil, user.id);
+        await query('UPDATE users SET login_attempts = $1, locked_until = $2 WHERE id = $3', [0, lockUntil, user.id]);
         return res.status(423).json({ error: 'Conta bloqueada por 30 minutos devido a múltiplas tentativas.' });
       }
-      db.prepare('UPDATE users SET login_attempts = ? WHERE id = ?').run(attempts, user.id);
+      await query('UPDATE users SET login_attempts = $1 WHERE id = $2', [attempts, user.id]);
       return res.status(401).json({ error: `Email ou senha incorretos. ${MAX_LOGIN_ATTEMPTS - attempts} tentativas restantes.` });
     }
 
-    db.prepare("UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = datetime('now') WHERE id = ?").run(user.id);
+    await query("UPDATE users SET login_attempts = 0, locked_until = NULL, last_login = NOW() WHERE id = $1", [user.id]);
 
     const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
@@ -101,10 +102,15 @@ exports.login = async (req, res) => {
   }
 };
 
-exports.me = (req, res) => {
-  const user = db.prepare('SELECT id, name, email, plan, role FROM users WHERE id = ?').get(req.userId);
-  if (!user) {
-    return res.status(404).json({ error: 'Usuário não encontrado' });
+exports.me = async (req, res) => {
+  try {
+    const user = (await query('SELECT id, name, email, plan, role FROM users WHERE id = $1', [req.userId])).rows[0];
+    if (!user) {
+      return res.status(404).json({ error: 'Usuário não encontrado' });
+    }
+    res.json({ ...user, role: user.role || 'user' });
+  } catch (err) {
+    console.error('Me error:', err.message);
+    res.status(500).json({ error: 'Erro interno do servidor' });
   }
-  res.json({ ...user, role: user.role || 'user' });
 };

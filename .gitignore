@@ -2,9 +2,6 @@ node_modules/
 client/node_modules/
 server/node_modules/
 client/dist/
-server/crm.db
-server/crm.db-shm
-server/crm.db-wal
 .env
 *.log
 .DS_Store
