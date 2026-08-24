@@ -25,7 +25,7 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 200 }));
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '1mb' }));
 
-app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, max: 15 }), authRoutes);
+app.use('/api/auth', rateLimit({ windowMs: 15 * 60 * 1000, max: 60 }), authRoutes);
 app.use('/api/contacts', contactRoutes);
 app.use('/api/deals', dealRoutes);
 app.use('/api/activities', activityRoutes);
